@@ -2,6 +2,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance
 import tkinter as tk
 from tkinter import filedialog, simpledialog, messagebox, ttk
 import os
+import sys
 
 try:
     import pytesseract
@@ -123,6 +124,7 @@ class SwatchExtractor:
         
         # State
         self.selection_enabled = False
+        self.texture_mode = False  # For textured swatches
         self.text_offset_from_color_x1 = None
         self.text_offset_from_color_y1 = None
         self.text_width = None
@@ -225,6 +227,17 @@ class SwatchExtractor:
                                       wraplength=550)
         self.selection_btn.pack(fill=tk.X, pady=10)
         
+        # Texture mode checkbox
+        self.texture_var = tk.BooleanVar(value=False)
+        texture_check = tk.Checkbutton(inner_panel, 
+                                       text="Texture Mode",
+                                       variable=self.texture_var,
+                                       command=self.toggle_texture_mode,
+                                       font=("Arial", 10),
+                                       bg='#f0f0f0',
+                                       activebackground='#f0f0f0')
+        texture_check.pack(anchor=tk.W, pady=5)
+        
         tk.Label(inner_panel, text="", height=1, bg='#f0f0f0').pack()
         
         # Instructions
@@ -280,6 +293,14 @@ class SwatchExtractor:
         self.extracted_label = tk.Label(inner_panel, text="Extracted: 0", 
                                         font=("Arial", 12, "bold"), bg='#f0f0f0')
         self.extracted_label.pack(anchor=tk.W, pady=5)
+    
+    def toggle_texture_mode(self):
+        """Toggle texture mode for patterned swatches."""
+        self.texture_mode = self.texture_var.get()
+        if self.texture_mode:
+            self.status_label.config(text="Texture mode: Will use edge detection for boundaries", fg="blue")
+        else:
+            self.status_label.config(text="Normal mode: Detecting solid color boundaries", fg="blue")
     
     def toggle_selection(self):
         self.selection_enabled = not self.selection_enabled
@@ -396,7 +417,10 @@ class SwatchExtractor:
         img_x, img_y = self.viewer.screen_to_image(event.x, event.y)
         
         # Detect color boundaries
-        x1, y1, x2, y2 = self.find_color_boundaries(img_x, img_y)
+        if self.texture_mode:
+            x1, y1, x2, y2 = self.find_textured_swatch_boundaries(img_x, img_y)
+        else:
+            x1, y1, x2, y2 = self.find_color_boundaries(img_x, img_y)
         
         if x2 - x1 < 20 or y2 - y1 < 20:
             self.status_label.config(text="Region too small, click on color center", fg="red")
@@ -567,6 +591,70 @@ class SwatchExtractor:
         
         return x1, y1, x2, y2
     
+    def find_textured_swatch_boundaries(self, click_x, click_y):
+        """Find boundaries of textured swatches using edge detection approach."""
+        pixels = self.original_image.load()
+        
+        # Get a sample of colors around click point to understand the texture
+        sample_radius = 10
+        color_samples = []
+        for dy in range(-sample_radius, sample_radius + 1, 3):
+            for dx in range(-sample_radius, sample_radius + 1, 3):
+                sx = click_x + dx
+                sy = click_y + dy
+                if 0 <= sx < self.viewer.img_width and 0 <= sy < self.viewer.img_height:
+                    color_samples.append(pixels[sx, sy])
+        
+        # Calculate average color and variance for the texture
+        if not color_samples:
+            return self.find_color_boundaries(click_x, click_y)
+        
+        avg_r = sum(c[0] for c in color_samples) / len(color_samples)
+        avg_g = sum(c[1] for c in color_samples) / len(color_samples)
+        avg_b = sum(c[2] for c in color_samples) / len(color_samples)
+        
+        # Calculate standard deviation for texture
+        variance = sum(
+            (c[0] - avg_r)**2 + (c[1] - avg_g)**2 + (c[2] - avg_b)**2 
+            for c in color_samples
+        ) / len(color_samples)
+        texture_threshold = max(60, min(120, variance ** 0.5 * 3))  # Adaptive threshold
+        
+        def texture_matches(x, y):
+            """Check if pixel is part of the textured swatch."""
+            if x < 0 or y < 0 or x >= self.viewer.img_width or y >= self.viewer.img_height:
+                return False
+            pixel = pixels[x, y]
+            # Check if pixel is within the texture's color range
+            diff = abs(pixel[0] - avg_r) + abs(pixel[1] - avg_g) + abs(pixel[2] - avg_b)
+            return diff < texture_threshold
+        
+        # Find boundaries by expanding from center
+        x1 = click_x
+        while x1 > 0 and texture_matches(x1 - 1, click_y):
+            x1 -= 1
+        
+        x2 = click_x
+        while x2 < self.viewer.img_width - 1 and texture_matches(x2 + 1, click_y):
+            x2 += 1
+        
+        y1 = click_y
+        while y1 > 0 and texture_matches(click_x, y1 - 1):
+            y1 -= 1
+        
+        y2 = click_y
+        while y2 < self.viewer.img_height - 1 and texture_matches(click_x, y2 + 1):
+            y2 += 1
+        
+        # Apply smaller margin for textured swatches
+        margin = 3
+        x1 = min(x1 + margin, click_x)
+        y1 = min(y1 + margin, click_y)
+        x2 = max(x2 - margin, click_x)
+        y2 = max(y2 - margin, click_y)
+        
+        return x1, y1, x2, y2
+    
     def extract_text_from_box(self, x1, y1, x2, y2):
         if not HAS_OCR:
             return None
@@ -622,9 +710,46 @@ def main():
     import sys
     
     root = tk.Tk()
+    
+    # Set window icon early
+    try:
+        # Handle PyInstaller bundled resources
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable
+            base_path = sys._MEIPASS
+        else:
+            # Running as script
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        
+        # Try .ico file first (works best on Windows)
+        ico_path = os.path.join(base_path, 'logo.ico')
+        if os.path.exists(ico_path):
+            root.wm_iconbitmap(ico_path)
+        else:
+            # Fallback to .png with iconphoto
+            icon_path = os.path.join(base_path, 'logo.png')
+            if os.path.exists(icon_path):
+                icon = tk.PhotoImage(file=icon_path)
+                root.iconphoto(True, icon)
+    except Exception as e:
+        print(f"Could not load icon: {e}")
+    
     root.withdraw()
     
     file_dialog = tk.Toplevel()
+    
+    # Set icon on file dialog too
+    try:
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        ico_path = os.path.join(base_path, 'logo.ico')
+        if os.path.exists(ico_path):
+            file_dialog.iconbitmap(ico_path)
+    except Exception as e:
+        print(f"Could not load icon for dialog: {e}")
+    
     file_dialog.title("Color Swatch Extractor - Select Image")
     file_dialog.geometry("600x200")
     file_dialog.resizable(False, False)

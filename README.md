@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="logo.png" alt="SwatchBuckler Logo" width="200"/>
+</div>
+
 # SwatchBuckler
 
 A powerful color swatch extraction tool for designers and developers. Extract color swatches from product sheets, design documents, and images with ease.
