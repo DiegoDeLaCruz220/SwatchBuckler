@@ -778,83 +778,87 @@ class SwatchExtractor:
         return x1, y1, x2, y2
     
     def find_swatch_in_region(self, region_x1, region_y1, region_x2, region_y2):
-        """Find actual swatch boundaries within the user-drawn region using edge detection."""
+        """Find actual swatch boundaries within the user-drawn region."""
         pixels = self.original_image.load()
         width, height = self.viewer.img_width, self.viewer.img_height
         
-        # Ensure coordinates are within bounds and integers
-        region_x1 = max(0, min(int(region_x1), width - 1))
-        region_x2 = max(0, min(int(region_x2), width - 1))
-        region_y1 = max(0, min(int(region_y1), height - 1))
-        region_y2 = max(0, min(int(region_y2), height - 1))
+        # Sample colors from the inner area of the region (avoiding edges)
+        margin = max(3, min(10, (region_x2 - region_x1) // 10))
+        sample_x1 = region_x1 + margin
+        sample_y1 = region_y1 + margin
+        sample_x2 = region_x2 - margin
+        sample_y2 = region_y2 - margin
         
-        # Find the strongest vertical edges (likely swatch borders)
-        # Scan from left - look for strongest vertical edge
-        best_left = region_x1
-        max_edge_strength = 0
-        search_range = min(50, (region_x2 - region_x1) // 2)
-        for x in range(region_x1, min(region_x1 + search_range, region_x2)):
-            edge_strength = 0
-            for y in range(region_y1, region_y2):
-                if x > 0 and x < width - 1:
-                    left_color = pixels[x - 1, y]
-                    right_color = pixels[x + 1, y]
-                    diff = sum(abs(left_color[i] - right_color[i]) for i in range(3))
-                    edge_strength += diff
-            if edge_strength > max_edge_strength:
-                max_edge_strength = edge_strength
-                best_left = x
+        if sample_x2 <= sample_x1 or sample_y2 <= sample_y1:
+            # Region too small, return original
+            return region_x1, region_y1, region_x2, region_y2
         
-        # Scan from right - look for strongest vertical edge
-        best_right = region_x2
-        max_edge_strength = 0
-        search_range = min(50, (region_x2 - region_x1) // 2)
-        for x in range(region_x2, max(region_x2 - search_range, region_x1), -1):
-            edge_strength = 0
-            for y in range(region_y1, region_y2):
-                if x > 0 and x < width - 1:
-                    left_color = pixels[x - 1, y]
-                    right_color = pixels[x + 1, y]
-                    diff = sum(abs(left_color[i] - right_color[i]) for i in range(3))
-                    edge_strength += diff
-            if edge_strength > max_edge_strength:
-                max_edge_strength = edge_strength
-                best_right = x
+        # Sample colors from the swatch interior
+        color_samples = []
+        step = max(1, (sample_x2 - sample_x1) // 10)
+        for y in range(sample_y1, sample_y2, step):
+            for x in range(sample_x1, sample_x2, step):
+                if 0 <= x < width and 0 <= y < height:
+                    color_samples.append(pixels[x, y])
         
-        # Find the strongest horizontal edges
-        # Scan from top - look for strongest horizontal edge
-        best_top = region_y1
-        max_edge_strength = 0
-        search_range = min(50, (region_y2 - region_y1) // 2)
-        for y in range(region_y1, min(region_y1 + search_range, region_y2)):
-            edge_strength = 0
-            for x in range(region_x1, region_x2):
-                if y > 0 and y < height - 1:
-                    top_color = pixels[x, y - 1]
-                    bottom_color = pixels[x, y + 1]
-                    diff = sum(abs(top_color[i] - bottom_color[i]) for i in range(3))
-                    edge_strength += diff
-            if edge_strength > max_edge_strength:
-                max_edge_strength = edge_strength
-                best_top = y
+        if not color_samples:
+            return region_x1, region_y1, region_x2, region_y2
         
-        # Scan from bottom - look for strongest horizontal edge
-        best_bottom = region_y2
-        max_edge_strength = 0
-        search_range = min(50, (region_y2 - region_y1) // 2)
-        for y in range(region_y2, max(region_y2 - search_range, region_y1), -1):
-            edge_strength = 0
-            for x in range(region_x1, region_x2):
-                if y > 0 and y < height - 1:
-                    top_color = pixels[x, y - 1]
-                    bottom_color = pixels[x, y + 1]
-                    diff = sum(abs(top_color[i] - bottom_color[i]) for i in range(3))
-                    edge_strength += diff
-            if edge_strength > max_edge_strength:
-                max_edge_strength = edge_strength
-                best_bottom = y
+        # Calculate average color of the swatch
+        avg_r = sum(c[0] for c in color_samples) / len(color_samples)
+        avg_g = sum(c[1] for c in color_samples) / len(color_samples)
+        avg_b = sum(c[2] for c in color_samples) / len(color_samples)
         
-        return best_left, best_top, best_right, best_bottom
+        # Calculate color variance
+        variance = sum(
+            (c[0] - avg_r)**2 + (c[1] - avg_g)**2 + (c[2] - avg_b)**2 
+            for c in color_samples
+        ) / len(color_samples)
+        std_dev = variance ** 0.5
+        
+        # Threshold based on swatch texture
+        color_threshold = max(50, min(120, std_dev * 3))
+        
+        def is_swatch_color(x, y):
+            if x < 0 or y < 0 or x >= width or y >= height:
+                return False
+            pixel = pixels[x, y]
+            diff = ((pixel[0] - avg_r)**2 + (pixel[1] - avg_g)**2 + (pixel[2] - avg_b)**2) ** 0.5
+            return diff < color_threshold
+        
+        # Find left boundary
+        x1 = region_x1
+        for x in range(region_x1, sample_x1):
+            mid_y = (region_y1 + region_y2) // 2
+            if is_swatch_color(x, mid_y):
+                x1 = x
+                break
+        
+        # Find right boundary
+        x2 = region_x2
+        for x in range(region_x2, sample_x2, -1):
+            mid_y = (region_y1 + region_y2) // 2
+            if is_swatch_color(x, mid_y):
+                x2 = x
+                break
+        
+        # Find top boundary
+        y1 = region_y1
+        for y in range(region_y1, sample_y1):
+            mid_x = (region_x1 + region_x2) // 2
+            if is_swatch_color(mid_x, y):
+                y1 = y
+                break
+        
+        # Find bottom boundary
+        y2 = region_y2
+        for y in range(region_y2, sample_y2, -1):
+            mid_x = (region_x1 + region_x2) // 2
+            if is_swatch_color(mid_x, y):
+                y2 = y
+                break
+        
+        return x1, y1, x2, y2
     
     def extract_text_from_box(self, x1, y1, x2, y2):
         if not HAS_OCR:
